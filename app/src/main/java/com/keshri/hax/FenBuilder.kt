@@ -1,48 +1,19 @@
 package com.keshri.hax
 
 object FenBuilder {
-
-    fun fromBoard(
-        board: Array<CharArray>,
-        sideToMove: Char
-    ): String {
-
-        val fen = StringBuilder()
-
-        for (rank in 0 until 8) {
-
+    fun fromBoard(board: Array<CharArray>, sideToMove: Char): String {
+        val rows = board.joinToString("/") { row ->
+            val out = StringBuilder()
             var empty = 0
-
-            for (file in 0 until 8) {
-
-                val piece = board[rank][file]
-
-                if (piece == '.') {
-                    empty++
-                } else {
-
-                    if (empty > 0) {
-                        fen.append(empty)
-                        empty = 0
-                    }
-
-                    fen.append(piece)
+            for (p in row) {
+                if (p == '.') empty++ else {
+                    if (empty > 0) { out.append(empty); empty = 0 }
+                    out.append(p)
                 }
             }
-
-            if (empty > 0) {
-                fen.append(empty)
-            }
-
-            if (rank != 7) {
-                fen.append("/")
-            }
+            if (empty > 0) out.append(empty)
+            out.toString()
         }
-
-        fen.append(" ")
-        fen.append(sideToMove)
-        fen.append(" - - 0 1")
-
-        return fen.toString()
+        return "$rows $sideToMove - - 0 1"
     }
 }

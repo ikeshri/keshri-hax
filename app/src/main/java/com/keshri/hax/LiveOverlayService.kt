@@ -1,29 +1,14 @@
 package com.keshri.hax
 
-import android.app.Activity
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Service
-import android.content.Context
-import android.content.Intent
+import android.app.*
+import android.content.*
 import android.graphics.Bitmap
-import android.graphics.Color
-import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplay
-import android.media.ImageReader
+import android.media.*
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.os.Build
-import android.os.IBinder
-import android.util.DisplayMetrics
-import android.view.Gravity
-import android.view.MotionEvent
-import android.view.WindowManager
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.TextView
-import androidx.core.app.NotificationCompat
+import android.os.*
+import android.view.*
 import androidx.core.app.ServiceCompat
 import android.content.pm.ServiceInfo
 import java.util.concurrent.Executors
@@ -31,843 +16,242 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class LiveOverlayService : Service() {
 
-    private lateinit var windowManager: WindowManager
+    companion object {
+        private const val CHANNEL_ID = "keshri_hax_analysis"
+        private const val NOTIFICATION_ID = 42
+    }
 
-    private var bubble: TextView? = null
-    private var panel: LinearLayout? = null
-
-    private var mediaProjection: MediaProjection? =
-        null
-
-    private var virtualDisplay: VirtualDisplay? =
-        null
-
-    private var imageReader: ImageReader? =
-        null
-
-    private var bubbleParams:
-        WindowManager.LayoutParams? = null
+    private var projection: MediaProjection? = null
+    private var reader: ImageReader? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var panel: OverlayPanelView? = null
+    private var windowManager: WindowManager? = null
+    private val running = AtomicBoolean(false)
+    private val paused = AtomicBoolean(false)
+    private val executor = Executors.newSingleThreadExecutor()
 
     private var side = "WHITE"
-
-    private var analysisSide = 'w'
-
-    private var boardPipeline: BoardPipeline? =
-        null
-
-    private var chessEngine: ChessEngine? =
-        null
-
-    private var statusText: TextView? =
-        null
-
-    private var resultText: TextView? =
-        null
-
-    private val worker =
-        Executors.newSingleThreadExecutor()
-
-    private val processing =
-        AtomicBoolean(false)
-
-    private var screenWidth = 0
-    private var screenHeight = 0
-    private var screenDensity = 0
-
-    companion object {
-        private const val CHANNEL_ID =
-            "keshri_hax_analysis"
-
-        private const val NOTIFICATION_ID =
-            7001
-
-        private const val VIRTUAL_DISPLAY_NAME =
-            "KeshriHaxCapture"
-    }
+    private var lastAnalysis = 0L
 
     override fun onCreate() {
         super.onCreate()
-
-        windowManager =
-            getSystemService(
-                Context.WINDOW_SERVICE
-            ) as WindowManager
-
-        createNotificationChannel()
-
-        val metrics =
-            DisplayMetrics()
-
-        @Suppress("DEPRECATION")
-        windowManager.defaultDisplay
-            .getRealMetrics(metrics)
-
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
-        screenDensity = metrics.densityDpi
-
-        chessEngine =
-            ChessEngine(this)
-
-        val recognizer =
-            PieceRecognizer(this)
-
-        if (recognizer.load()) {
-            boardPipeline =
-                BoardPipeline(recognizer)
-        } else {
-            recognizer.close()
-        }
+        createChannel()
     }
 
-    override fun onStartCommand(
-        intent: Intent?,
-        flags: Int,
-        startId: Int
-    ): Int {
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        side = intent?.getStringExtra("side") ?: "WHITE"
+        val resultCode = intent?.getIntExtra("resultCode", Activity.RESULT_CANCELED)
+            ?: Activity.RESULT_CANCELED
+        val data = intent?.getParcelableExtraCompat<Intent>("data")
 
-        side =
-            intent?.getStringExtra("side")
-                ?: "WHITE"
-
-        analysisSide =
-            if (side == "BLACK") {
-                'b'
-            } else {
-                'w'
-            }
-
-        startProjectionForeground()
-
-        val resultCode =
-            intent?.getIntExtra(
-                "resultCode",
-                Activity.RESULT_CANCELED
-            )
-
-        val data =
-            if (Build.VERSION.SDK_INT >= 33) {
-
-                intent?.getParcelableExtra(
-                    "data",
-                    Intent::class.java
-                )
-
-            } else {
-
-                @Suppress("DEPRECATION")
-                intent?.getParcelableExtra(
-                    "data"
-                )
-            }
-
-        if (
-            resultCode != Activity.RESULT_OK ||
-            data == null
-        ) {
-
+        if (resultCode != Activity.RESULT_OK || data == null) {
             stopSelf()
-
             return START_NOT_STICKY
         }
 
-        try {
+        startForegroundNow()
 
-            val manager =
-                getSystemService(
-                    MEDIA_PROJECTION_SERVICE
-                ) as MediaProjectionManager
-
-            mediaProjection =
-                manager.getMediaProjection(
-                    resultCode,
-                    data
-                )
-
-            setupScreenCapture()
-
-            showBubble()
-
-        } catch (_: Exception) {
-
-            stopSelf()
-
-            return START_NOT_STICKY
+        if (running.compareAndSet(false, true)) {
+            showOverlay()
+            setupCapture(resultCode, data)
         }
-
         return START_NOT_STICKY
     }
 
-    private fun startProjectionForeground() {
+    private fun startForegroundNow() {
+        val notification = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("Keshri Hax")
+            .setContentText("Chess analysis is active")
+            .setSmallIcon(android.R.drawable.ic_menu_view)
+            .setOngoing(true)
+            .build()
 
-        val notification =
-            NotificationCompat.Builder(
-                this,
-                CHANNEL_ID
-            )
-                .setSmallIcon(
-                    android.R.drawable.ic_menu_view
-                )
-                .setContentTitle(
-                    "Keshri Hax"
-                )
-                .setContentText(
-                    "Offline chess analysis active"
-                )
-                .setOngoing(true)
-                .setPriority(
-                    NotificationCompat.PRIORITY_LOW
-                )
-                .build()
+        val type = if (Build.VERSION.SDK_INT >= 29)
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
 
-        if (Build.VERSION.SDK_INT >= 29) {
-
-            ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo
-                    .FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            )
-
-        } else {
-
-            startForeground(
-                NOTIFICATION_ID,
-                notification
-            )
-        }
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
     }
 
-    private fun createNotificationChannel() {
-
-        if (Build.VERSION.SDK_INT >= 26) {
-
-            val channel =
-                NotificationChannel(
-                    CHANNEL_ID,
-                    "Keshri Hax Analysis",
-                    NotificationManager
-                        .IMPORTANCE_LOW
-                )
-
-            val manager =
-                getSystemService(
-                    NotificationManager::class.java
-                )
-
-            manager.createNotificationChannel(
-                channel
-            )
-        }
-    }
-
-    private fun setupScreenCapture() {
-
-        val projection =
-            mediaProjection ?: return
-
-        if (
-            screenWidth <= 0 ||
-            screenHeight <= 0
-        ) {
-            return
-        }
-
-        imageReader =
-            ImageReader.newInstance(
-                screenWidth,
-                screenHeight,
-                PixelFormat.RGBA_8888,
-                2
-            )
-
-        imageReader?.setOnImageAvailableListener(
-            { reader ->
-
-                if (
-                    !processing.compareAndSet(
-                        false,
-                        true
-                    )
-                ) {
-                    return@setOnImageAvailableListener
-                }
-
-                var image =
-                    reader.acquireLatestImage()
-
-                if (image == null) {
-                    processing.set(false)
-                    return@setOnImageAvailableListener
-                }
-
-                worker.execute {
-
-                    try {
-
-                        val bitmap =
-                            ScreenCaptureAnalyzer
-                                .imageToBitmap(image)
-
-                        image.close()
-                        image = null
-
-                        if (bitmap != null) {
-                            analyzeFrame(bitmap)
-                        }
-
-                    } catch (_: Exception) {
-
-                        try {
-                            image?.close()
-                        } catch (_: Exception) {
-                        }
-
-                    } finally {
-
-                        processing.set(false)
-                    }
-                }
-
-            },
-            null
-        )
-
-        virtualDisplay =
-            projection.createVirtualDisplay(
-                VIRTUAL_DISPLAY_NAME,
-                screenWidth,
-                screenHeight,
-                screenDensity,
-                DisplayManager
-                    .VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader?.surface,
-                null,
-                null
-            )
-    }
-
-    private fun analyzeFrame(
-        bitmap: Bitmap
-    ) {
-
+    private fun setupCapture(resultCode: Int, data: Intent) {
         try {
+            val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            projection = manager.getMediaProjection(resultCode, data)
 
-            val pipeline =
-                boardPipeline
+            val dm = getSystemService(DISPLAY_SERVICE) as DisplayManager
+            val metrics = resources.displayMetrics
+            val width = metrics.widthPixels
+            val height = metrics.heightPixels
+            val density = metrics.densityDpi
 
-            if (pipeline == null) {
+            reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+            reader?.setOnImageAvailableListener({ r ->
+                if (!running.get() || paused.get()) return@setOnImageAvailableListener
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastAnalysis < 1400) return@setOnImageAvailableListener
+                lastAnalysis = now
+                val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                executor.execute { processImage(image) }
+            }, Handler(Looper.getMainLooper()))
 
-                updateStatus(
-                    "MODEL NOT READY"
-                )
-
-                bitmap.recycle()
-
-                return
-            }
-
-            val result =
-                pipeline.analyze(
-                    screenshot = bitmap,
-                    sideToMove = analysisSide
-                )
-
-            bitmap.recycle()
-
-            if (!result.success) {
-
-                updateStatus(
-                    "BOARD: NOT DETECTED"
-                )
-
-                return
-            }
-
-            updateStatus(
-                "BOARD: DETECTED"
+            virtualDisplay = projection?.createVirtualDisplay(
+                "KeshriHaxCapture",
+                width, height, density,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader?.surface, null, null
             )
 
-            val fen =
-                result.fen
-
-            if (fen == null) {
-                return
-            }
-
-            val engine =
-                chessEngine
-
-            if (engine == null) {
-                return
-            }
-
-            val engineResult =
-                engine.analyze(
-                    fen = fen,
-                    depth = 16,
-                    timeoutMs = 8000
-                )
-
-            updateResult(
-                engineResult
-            )
-
-        } catch (_: Exception) {
-
-            updateStatus(
-                "ANALYSIS ERROR"
-            )
+            updatePanel("CAPTURING", "—", "—", "—", "—",
+                "Screen capture is live. Looking for a chess board.")
+        } catch (e: Exception) {
+            updatePanel("CAPTURE ERROR", "—", "—", "—", "—",
+                e.message ?: "Could not start screen capture")
         }
     }
 
-    private fun updateStatus(
-        text: String
+    private fun processImage(image: Image) {
+        var bitmap: Bitmap? = null
+        try {
+            val plane = image.planes[0]
+            val buffer = plane.buffer
+            val pixelStride = plane.pixelStride
+            val rowStride = plane.rowStride
+            val rowPadding = rowStride - pixelStride * image.width
+
+            val full = Bitmap.createBitmap(
+                image.width + rowPadding / pixelStride,
+                image.height,
+                Bitmap.Config.ARGB_8888
+            )
+            full.copyPixelsFromBuffer(buffer)
+            bitmap = Bitmap.createBitmap(full, 0, 0, image.width, image.height)
+            full.recycle()
+
+            updatePanel("SCANNING", "—", "—", "—", "—",
+                "Searching the captured screen for a chess board.")
+
+            // The actual vision pipeline is deliberately kept local/offline.
+            // It requires chess_pieces.tflite in app/src/main/assets.
+            val recognizer = PieceRecognizer(this)
+            if (!recognizer.load()) {
+                updatePanel("MODEL MISSING", "—", "—", "—", "—",
+                    "Add chess_pieces.tflite to app/src/main/assets.")
+                recognizer.close()
+                return
+            }
+
+            val pipeline = BoardPipeline(recognizer)
+            val result = pipeline.analyze(bitmap, if (side == "BLACK") 'b' else 'w')
+            if (!result.success || result.fen == null) {
+                updatePanel("BOARD NOT READY", "—", "—", "—",
+                    "${(result.confidence * 100).toInt()}%",
+                    result.message)
+                pipeline.close()
+                return
+            }
+
+            updatePanel("POSITION FOUND", "—", "—", "—",
+                "${(result.confidence * 100).toInt()}%", result.fen)
+
+            val engine = ChessEngine(this)
+            if (!engine.start()) {
+                updatePanel("VISION OK / ENGINE MISSING", "—", "—", "—",
+                    "${(result.confidence * 100).toInt()}%",
+                    "Add a compatible Stockfish binary to app/src/main/assets/stockfish.")
+                engine.close()
+                pipeline.close()
+                return
+            }
+
+            val analysis = engine.analyze(result.fen, 18)
+            updatePanel(
+                "ANALYZING",
+                analysis.bestMove ?: "—",
+                analysis.evaluation ?: "—",
+                analysis.depth?.toString() ?: "—",
+                "${(result.confidence * 100).toInt()}%",
+                analysis.pv ?: result.fen
+            )
+            engine.close()
+            pipeline.close()
+        } catch (e: Exception) {
+            updatePanel("ANALYSIS ERROR", "—", "—", "—", "—",
+                e.message ?: "Analysis failed")
+        } finally {
+            try { image.close() } catch (_: Exception) {}
+            try { bitmap?.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    private fun updatePanel(
+        status: String,
+        best: String,
+        eval: String,
+        depth: String,
+        confidence: String,
+        detail: String
     ) {
-
-        statusText?.post {
-            statusText?.text =
-                "● $text"
+        Handler(Looper.getMainLooper()).post {
+            panel?.state = OverlayPanelView.State(status, best, eval, depth, confidence, detail)
         }
     }
 
-    private fun updateResult(
-        result: EngineResult
-    ) {
+    private fun showOverlay() {
+        if (!Settings.canDrawOverlays(this)) return
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        windowManager = wm
 
-        resultText?.post {
-
-            if (result.error != null) {
-
-                resultText?.text =
-                    """
-                    BEST MOVE
-                    —
-                    
-                    ERROR
-                    ${result.error}
-                    """.trimIndent()
-
-                return@post
-            }
-
-            resultText?.text =
-                """
-                BEST MOVE
-                ${result.bestMove ?: "—"}
-                
-                EVALUATION
-                ${result.evaluation ?: "—"}
-                
-                DEPTH
-                ${result.depth}
-                
-                PV
-                ${result.pv.take(5).joinToString(" ")}
-                """.trimIndent()
-        }
-    }
-
-    private fun showBubble() {
-
-        if (bubble != null) {
-            return
-        }
-
-        bubble =
-            TextView(this).apply {
-
-                text = "♚"
-                textSize = 25f
-                gravity = Gravity.CENTER
-
-                setTextColor(
-                    Color.rgb(
-                        0,
-                        255,
-                        157
-                    )
-                )
-
-                setBackgroundColor(
-                    Color.rgb(
-                        12,
-                        18,
-                        27
-                    )
-                )
-
-                elevation = 12f
-            }
-
-        bubbleParams =
-            WindowManager.LayoutParams(
-                dp(58),
-                dp(58),
-                if (Build.VERSION.SDK_INT >= 26) {
-                    WindowManager.LayoutParams
-                        .TYPE_APPLICATION_OVERLAY
-                } else {
-                    @Suppress("DEPRECATION")
-                    WindowManager.LayoutParams
-                        .TYPE_PHONE
-                },
-                WindowManager.LayoutParams
-                    .FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT
-            ).apply {
-
-                gravity =
-                    Gravity.TOP or Gravity.START
-
-                x = dp(18)
-                y = dp(240)
-            }
-
-        setupBubbleTouch()
-
-        windowManager.addView(
-            bubble,
-            bubbleParams
+        val view = OverlayPanelView(
+            this,
+            onStop = { stopSelf() },
+            onRescan = { lastAnalysis = 0L },
+            onPause = { paused.set(!paused.get()) }
         )
-    }
+        panel = view
 
-    private fun setupBubbleTouch() {
+        val type = if (Build.VERSION.SDK_INT >= 26)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else WindowManager.LayoutParams.TYPE_PHONE
 
-        val view =
-            bubble ?: return
-
-        var downX = 0f
-        var downY = 0f
-
-        var startX = 0
-        var startY = 0
-
-        var moved = false
-
-        view.setOnTouchListener { _, event ->
-
-            val params =
-                bubbleParams
-                    ?: return@setOnTouchListener false
-
-            when (
-                event.actionMasked
-            ) {
-
-                MotionEvent.ACTION_DOWN -> {
-
-                    downX = event.rawX
-                    downY = event.rawY
-
-                    startX = params.x
-                    startY = params.y
-
-                    moved = false
-
-                    true
-                }
-
-                MotionEvent.ACTION_MOVE -> {
-
-                    val dx =
-                        (
-                            event.rawX -
-                                    downX
-                        ).toInt()
-
-                    val dy =
-                        (
-                            event.rawY -
-                                    downY
-                        ).toInt()
-
-                    if (
-                        kotlin.math.abs(dx) > 8 ||
-                        kotlin.math.abs(dy) > 8
-                    ) {
-                        moved = true
-                    }
-
-                    params.x =
-                        startX + dx
-
-                    params.y =
-                        startY + dy
-
-                    windowManager
-                        .updateViewLayout(
-                            view,
-                            params
-                        )
-
-                    true
-                }
-
-                MotionEvent.ACTION_UP -> {
-
-                    if (!moved) {
-                        togglePanel()
-                    }
-
-                    true
-                }
-
-                else -> false
-            }
-        }
-    }
-
-    private fun togglePanel() {
-
-        if (panel == null) {
-            showPanel()
-        } else {
-            removePanel()
-        }
-    }
-
-    private fun showPanel() {
-
-        if (panel != null) {
-            return
+        val params = WindowManager.LayoutParams(
+            330,
+            535,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = 18
+            y = 120
         }
 
-        val root =
-            LinearLayout(this).apply {
-
-                orientation =
-                    LinearLayout.VERTICAL
-
-                setPadding(
-                    dp(20),
-                    dp(18),
-                    dp(20),
-                    dp(18)
-                )
-
-                setBackgroundColor(
-                    Color.rgb(
-                        8,
-                        12,
-                        20
-                    )
-                )
-            }
-
-        val title =
-            TextView(this).apply {
-
-                text =
-                    "⚡ KESHRI HAX"
-
-                textSize = 20f
-
-                setTextColor(
-                    Color.rgb(
-                        0,
-                        255,
-                        157
-                    )
-                )
-            }
-
-        val mode =
-            TextView(this).apply {
-
-                text =
-                    "OFFLINE ANALYSIS • SIDE: $side"
-
-                textSize = 12f
-
-                setTextColor(
-                    Color.LTGRAY
-                )
-
-                setPadding(
-                    0,
-                    dp(6),
-                    0,
-                    dp(14)
-                )
-            }
-
-        statusText =
-            TextView(this).apply {
-
-                text =
-                    "● SCREEN CAPTURE READY"
-
-                textSize = 13f
-
-                setTextColor(
-                    Color.rgb(
-                        0,
-                        220,
-                        150
-                    )
-                )
-            }
-
-        resultText =
-            TextView(this).apply {
-
-                text =
-                    """
-                    BEST MOVE
-                    —
-                    
-                    EVALUATION
-                    —
-                    
-                    DEPTH
-                    —
-                    """.trimIndent()
-
-                textSize = 15f
-
-                setTextColor(
-                    Color.WHITE
-                )
-
-                setPadding(
-                    0,
-                    dp(18),
-                    0,
-                    dp(18)
-                )
-            }
-
-        val analyze =
-            Button(this).apply {
-
-                text =
-                    "ANALYZE CURRENT FRAME"
-
-                setOnClickListener {
-                    requestSingleAnalysis()
-                }
-            }
-
-        val close =
-            Button(this).apply {
-
-                text = "MINIMIZE"
-
-                setOnClickListener {
-                    removePanel()
-                }
-            }
-
-        root.addView(title)
-        root.addView(mode)
-        root.addView(statusText)
-        root.addView(resultText)
-        root.addView(analyze)
-        root.addView(close)
-
-        panel = root
-
-        val params =
-            WindowManager.LayoutParams(
-                dp(315),
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                if (Build.VERSION.SDK_INT >= 26) {
-                    WindowManager.LayoutParams
-                        .TYPE_APPLICATION_OVERLAY
-                } else {
-                    @Suppress("DEPRECATION")
-                    WindowManager.LayoutParams
-                        .TYPE_PHONE
-                },
-                WindowManager.LayoutParams
-                    .FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT
-            ).apply {
-
-                gravity =
-                    Gravity.TOP or Gravity.END
-
-                x = dp(14)
-                y = dp(140)
-            }
-
-        windowManager.addView(
-            root,
-            params
-        )
-    }
-
-    private fun requestSingleAnalysis() {
-
-        updateStatus(
-            "WAITING FOR NEXT SCREEN FRAME"
-        )
-    }
-
-    private fun removePanel() {
-
-        panel?.let {
-
-            try {
-                windowManager.removeView(it)
-            } catch (_: Exception) {
-            }
-        }
-
-        panel = null
-        statusText = null
-        resultText = null
-    }
-
-    private fun dp(
-        value: Int
-    ): Int {
-
-        return (
-            value *
-                    resources
-                        .displayMetrics
-                        .density
-            ).toInt()
+        wm.addView(view, params)
     }
 
     override fun onDestroy() {
-
-        removePanel()
-
-        bubble?.let {
-
-            try {
-                windowManager.removeView(it)
-            } catch (_: Exception) {
-            }
-        }
-
-        bubble = null
-
-        virtualDisplay?.release()
-        virtualDisplay = null
-
-        imageReader?.close()
-        imageReader = null
-
-        mediaProjection?.stop()
-        mediaProjection = null
-
-        worker.shutdownNow()
-
-        boardPipeline?.close()
-        boardPipeline = null
-
-        chessEngine?.stop()
-        chessEngine = null
-
+        running.set(false)
+        try { virtualDisplay?.release() } catch (_: Exception) {}
+        try { reader?.close() } catch (_: Exception) {}
+        try { projection?.stop() } catch (_: Exception) {}
+        try { panel?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+        executor.shutdownNow()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 
-    override fun onBind(
-        intent: Intent?
-    ): IBinder? = null
+    override fun onBind(intent: Intent?) = null
+
+    private fun createChannel() {
+        if (Build.VERSION.SDK_INT >= 26) {
+            val channel = NotificationChannel(
+                CHANNEL_ID, "Keshri Hax Analysis",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
+    }
 }
+
+private inline fun <reified T : Parcelable> Intent.getParcelableExtraCompat(key: String): T? =
+    if (Build.VERSION.SDK_INT >= 33) getParcelableExtra(key, T::class.java)
+    else @Suppress("DEPRECATION") getParcelableExtra(key)

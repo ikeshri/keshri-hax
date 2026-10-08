@@ -3,254 +3,62 @@ package com.keshri.hax
 import android.content.Context
 import android.graphics.Bitmap
 import org.tensorflow.lite.Interpreter
-import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.channels.FileChannel
 
-class PieceRecognizer(
-    private val context: Context
-) {
+data class PiecePrediction(val piece: Char, val confidence: Float)
 
+class PieceRecognizer(private val context: Context) {
     private var interpreter: Interpreter? = null
-
-    /*
-     * Expected model:
-     *
-     * app/src/main/assets/chess_pieces.tflite
-     *
-     * The model must classify:
-     *
-     * 0  empty
-     * 1  white pawn
-     * 2  white knight
-     * 3  white bishop
-     * 4  white rook
-     * 5  white queen
-     * 6  white king
-     * 7  black pawn
-     * 8  black knight
-     * 9  black bishop
-     * 10 black rook
-     * 11 black queen
-     * 12 black king
-     */
-
-    private val labels = arrayOf(
-        '.',
-        'P',
-        'N',
-        'B',
-        'R',
-        'Q',
-        'K',
-        'p',
-        'n',
-        'b',
-        'r',
-        'q',
-        'k'
+    private val labels = charArrayOf(
+        '.', 'P','N','B','R','Q','K',
+        'p','n','b','r','q','k'
     )
 
-    private val inputSize = 64
-
     fun load(): Boolean {
-
+        if (interpreter != null) return true
         return try {
-
-            val model =
-                loadModel("chess_pieces.tflite")
-
-            interpreter =
-                Interpreter(model)
-
+            context.assets.open("chess_pieces.tflite").use { input ->
+                val bytes = input.readBytes()
+                val buffer = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
+                buffer.put(bytes).rewind()
+                interpreter = Interpreter(buffer)
+            }
             true
-
         } catch (_: Exception) {
-
-            interpreter = null
-
             false
         }
     }
 
-    fun recognize(
-        square: Bitmap
-    ): PiecePrediction {
-
-        val engine = interpreter
-            ?: return PiecePrediction(
-                piece = '.',
-                confidence = 0f
-            )
-
-        return try {
-
-            val input =
-                bitmapToInput(square)
-
-            /*
-             * Output shape expected:
-             * [1][13]
-             */
-            val output =
-                Array(1) {
-                    FloatArray(labels.size)
-                }
-
-            engine.run(
-                input,
-                output
-            )
-
-            var bestIndex = 0
-            var bestScore = output[0][0]
-
-            for (i in 1 until labels.size) {
-
-                if (
-                    output[0][i] >
-                    bestScore
-                ) {
-
-                    bestIndex = i
-                    bestScore =
-                        output[0][i]
-                }
-            }
-
-            PiecePrediction(
-                piece = labels[bestIndex],
-                confidence = bestScore
-            )
-
-        } catch (_: Exception) {
-
-            PiecePrediction(
-                piece = '.',
-                confidence = 0f
-            )
+    fun recognize(square: Bitmap): PiecePrediction {
+        val model = interpreter ?: return PiecePrediction('.', 0f)
+        val input = ByteBuffer.allocateDirect(1 * 64 * 64 * 3 * 4)
+            .order(ByteOrder.nativeOrder())
+        val scaled = Bitmap.createScaledBitmap(square, 64, 64, true)
+        val pixels = IntArray(64 * 64)
+        scaled.getPixels(pixels, 0, 64, 0, 0, 64, 64)
+        for (px in pixels) {
+            input.putFloat(ColorUtil.r(px) / 255f)
+            input.putFloat(ColorUtil.g(px) / 255f)
+            input.putFloat(ColorUtil.b(px) / 255f)
         }
-    }
-
-    fun recognizeBoard(
-        squares: Array<Bitmap>
-    ): Array<CharArray> {
-
-        require(squares.size == 64) {
-            "Exactly 64 chess squares required"
-        }
-
-        val board =
-            Array(8) {
-                CharArray(8) { '.' }
-            }
-
-        for (index in squares.indices) {
-
-            val prediction =
-                recognize(squares[index])
-
-            /*
-             * Low-confidence predictions are treated
-             * as empty/unknown rather than inventing a piece.
-             */
-            board[index / 8][index % 8] =
-                if (prediction.confidence >= 0.60f) {
-                    prediction.piece
-                } else {
-                    '.'
-                }
-        }
-
-        return board
+        val output = Array(1) { FloatArray(labels.size) }
+        model.run(input, output)
+        var best = 0
+        for (i in 1 until labels.size) if (output[0][i] > output[0][best]) best = i
+        val conf = output[0][best].coerceIn(0f,1f)
+        if (scaled !== square) scaled.recycle()
+        return PiecePrediction(labels[best], conf)
     }
 
     fun close() {
-
         interpreter?.close()
         interpreter = null
     }
-
-    private fun bitmapToInput(
-        bitmap: Bitmap
-    ): ByteBuffer {
-
-        val resized =
-            Bitmap.createScaledBitmap(
-                bitmap,
-                inputSize,
-                inputSize,
-                true
-            )
-
-        val buffer =
-            ByteBuffer.allocateDirect(
-                1 *
-                    inputSize *
-                    inputSize *
-                    3 *
-                    4
-            )
-
-        buffer.order(
-            ByteOrder.nativeOrder()
-        )
-
-        for (y in 0 until inputSize) {
-
-            for (x in 0 until inputSize) {
-
-                val pixel =
-                    resized.getPixel(x, y)
-
-                buffer.putFloat(
-                    ((pixel shr 16) and 0xFF) / 255f
-                )
-
-                buffer.putFloat(
-                    ((pixel shr 8) and 0xFF) / 255f
-                )
-
-                buffer.putFloat(
-                    (pixel and 0xFF) / 255f
-                )
-            }
-        }
-
-        buffer.rewind()
-
-        if (resized !== bitmap) {
-            resized.recycle()
-        }
-
-        return buffer
-    }
-
-    private fun loadModel(
-        filename: String
-    ): ByteBuffer {
-
-        val descriptor =
-            context.assets.openFd(filename)
-
-        FileInputStream(
-            descriptor.fileDescriptor
-        ).use { input ->
-
-            val channel =
-                input.channel
-
-            return channel.map(
-                FileChannel.MapMode.READ_ONLY,
-                descriptor.startOffset,
-                descriptor.declaredLength
-            )
-        }
-    }
 }
 
-data class PiecePrediction(
-    val piece: Char,
-    val confidence: Float
-)
+private object ColorUtil {
+    fun r(c:Int)= (c shr 16) and 255
+    fun g(c:Int)= (c shr 8) and 255
+    fun b(c:Int)= c and 255
+}

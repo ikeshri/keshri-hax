@@ -1,0 +1,1 @@
+Place chess_pieces.tflite and stockfish here. See root README.md.
