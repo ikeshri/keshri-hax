@@ -3,23 +3,6 @@ package com.keshri.hax
 import android.graphics.Bitmap
 import android.util.Log
 
-/**
- * Complete offline board-analysis pipeline:
- *
- * Bitmap
- *   ↓
- * Board detection
- *   ↓
- * Board crop
- *   ↓
- * 64 squares
- *   ↓
- * Piece recognition
- *   ↓
- * Position validation
- *   ↓
- * FEN
- */
 class BoardPipeline(
     private val pieceRecognizer: PieceRecognizer,
     private val boardDetector: ChessVision = ChessVision()
@@ -37,11 +20,6 @@ class BoardPipeline(
         val message: String = ""
     )
 
-    /**
-     * Analyze one screen frame.
-     *
-     * This is intended for offline/self-game/puzzle analysis.
-     */
     fun analyze(
         screenshot: Bitmap,
         sideToMove: Char = 'w'
@@ -49,123 +27,104 @@ class BoardPipeline(
 
         if (screenshot.width <= 0 || screenshot.height <= 0) {
             return Result(
-                success = false,
+                false,
                 message = "Invalid screenshot"
             )
         }
 
         if (sideToMove != 'w' && sideToMove != 'b') {
             return Result(
-                success = false,
+                false,
                 message = "Invalid side to move"
             )
         }
 
+        var boardBitmap: Bitmap? = null
+        val squares = mutableListOf<Bitmap>()
+
         return try {
-            // 1. Locate chess board.
+
             val region = boardDetector.findBoard(screenshot)
 
-            if (region == null) {
-                return Result(
-                    success = false,
+                ?: return Result(
+                    false,
                     message = "Chess board not detected"
                 )
-            }
 
-            // 2. Crop board.
-            val boardBitmap = boardDetector.cropBoard(
+            boardBitmap = boardDetector.cropBoard(
                 screenshot,
                 region
             )
 
-            if (boardBitmap.width <= 0 || boardBitmap.height <= 0) {
+            val squareArray =
+                boardDetector.splitSquares(boardBitmap)
+
+            if (squareArray.size != 64) {
                 return Result(
-                    success = false,
-                    message = "Invalid board crop"
+                    false,
+                    message = "Could not create 64 squares"
                 )
             }
 
-            // 3. Split board into 64 squares.
-            val squares = boardDetector.splitSquares(
-                boardBitmap
-            )
-
-            if (squares.size != 64) {
-                return Result(
-                    success = false,
-                    message = "Expected 64 squares, got ${squares.size}"
-                )
-            }
+            squares.addAll(squareArray)
 
             val board = Array(8) {
-                CharArray(8) { '?' }
+                CharArray(8) { '.' }
             }
 
-            var totalConfidence = 0f
-            var recognizedSquares = 0
+            var confidenceTotal = 0f
+            var confidenceCount = 0
 
-            // 4. Recognize every square.
             for (index in squares.indices) {
 
-                val squareBitmap = squares[index]
-
-                val prediction = pieceRecognizer.recognize(
-                    squareBitmap
-                )
+                val prediction =
+                    pieceRecognizer.recognize(
+                        squares[index]
+                    )
 
                 val row = index / 8
                 val col = index % 8
 
-                board[row][col] = prediction.piece
+                board[row][col] =
+                    if (prediction.confidence >= 0.60f) {
+                        prediction.piece
+                    } else {
+                        '.'
+                    }
 
                 if (prediction.confidence > 0f) {
-                    totalConfidence += prediction.confidence
-                    recognizedSquares++
+                    confidenceTotal +=
+                        prediction.confidence
+                    confidenceCount++
                 }
-
-                squareBitmap.recycle()
             }
 
-            boardBitmap.recycle()
-
             val averageConfidence =
-                if (recognizedSquares > 0) {
-                    totalConfidence / recognizedSquares
+                if (confidenceCount > 0) {
+                    confidenceTotal /
+                            confidenceCount
                 } else {
                     0f
                 }
 
-            // 5. Convert unknown predictions to empty only
-            // when confidence is extremely low.
-            for (r in 0 until 8) {
-                for (c in 0 until 8) {
-                    if (board[r][c] == '?') {
-                        board[r][c] = '1'
-                    }
-                }
-            }
-
-            // 6. Validate chess position.
-            val validation = PositionValidator.validate(board)
-
-            if (!validation.isValid) {
+            if (!PositionValidator.isValid(board)) {
                 return Result(
                     success = false,
                     board = board,
                     confidence = averageConfidence,
-                    message = validation.message
+                    message =
+                        "Detected position is not a valid chess position"
                 )
             }
 
-            // 7. Build FEN.
-            val fen = FenBuilder.build(
+            val fen = FenBuilder.fromBoard(
                 board = board,
                 sideToMove = sideToMove
             )
 
             Log.d(
                 TAG,
-                "Board detected. FEN=$fen confidence=$averageConfidence"
+                "FEN=$fen confidence=$averageConfidence"
             )
 
             Result(
@@ -177,20 +136,36 @@ class BoardPipeline(
             )
 
         } catch (e: Exception) {
-            Log.e(TAG, "Board pipeline failed", e)
+
+            Log.e(
+                TAG,
+                "Board analysis failed",
+                e
+            )
 
             Result(
                 success = false,
-                message = e.message ?: "Unknown analysis error"
+                message =
+                    e.message ?: "Board analysis error"
             )
+
+        } finally {
+
+            squares.forEach {
+                try {
+                    it.recycle()
+                } catch (_: Exception) {
+                }
+            }
+
+            try {
+                boardBitmap?.recycle()
+            } catch (_: Exception) {
+            }
         }
     }
 
     fun close() {
-        try {
-            pieceRecognizer.close()
-        } catch (e: Exception) {
-            Log.w(TAG, "Recognizer close failed", e)
-        }
+        pieceRecognizer.close()
     }
 }
