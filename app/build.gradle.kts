@@ -36,6 +36,7 @@ android {
 }
 
 dependencies {
+implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-ktx:1.10.0")
     implementation("androidx.lifecycle:lifecycle-service:2.8.7")
