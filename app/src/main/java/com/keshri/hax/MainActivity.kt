@@ -2,164 +2,231 @@ package com.keshri.hax
 
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.media.projection.MediaProjectionManager
-import android.widget.*
-import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
+import android.view.Gravity
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
 
-class MainActivity : ComponentActivity() {
+class MainActivity : Activity() {
 
-    private var launching = false
+    companion object {
+        private const val REQUEST_CAPTURE = 501
+    }
+
     private var selectedSide = "WHITE"
-
-    private val captureLauncher =
-        registerForActivityResult(
-            ActivityResultContracts.StartActivityForResult()
-        ) { result ->
-
-            launching = false
-
-            if (result.resultCode != Activity.RESULT_OK ||
-                result.data == null
-            ) {
-                Toast.makeText(
-                    this,
-                    "Screen capture permission required",
-                    Toast.LENGTH_SHORT
-                ).show()
-                return@registerForActivityResult
-            }
-
-            val serviceIntent = Intent(
-                this,
-                LiveOverlayService::class.java
-            ).apply {
-                putExtra("resultCode", result.resultCode)
-                putExtra("data", result.data)
-                putExtra("side", selectedSide)
-            }
-
-            startForegroundService(serviceIntent)
-        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        buildUi()
+    }
+
+    private fun buildUi() {
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 40, 32, 32)
-            setBackgroundColor(0xFF05070D.toInt())
+            gravity = Gravity.CENTER
+            setPadding(32, 48, 32, 48)
+            setBackgroundColor(Color.rgb(7, 11, 18))
         }
 
         val title = TextView(this).apply {
-            text = "⚡ KESHRI HAX ⚡"
-            textSize = 28f
-            setTextColor(0xFF00FF9D.toInt())
+            text = "♚ KESHRI HAX"
+            textSize = 30f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(0, 255, 157))
         }
 
         val subtitle = TextView(this).apply {
-            text = "OFFLINE CHESS ANALYSIS"
+            text = "OFFLINE CHESS ANALYZER"
             textSize = 13f
-            setTextColor(0xFF8A94A6.toInt())
+            gravity = Gravity.CENTER
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 12, 0, 35)
         }
 
         val sideLabel = TextView(this).apply {
             text = "YOUR SIDE"
-            textSize = 15f
-            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
         }
 
-        val sideSpinner = Spinner(this)
+        val whiteButton = Button(this).apply {
+            text = "WHITE"
+            setOnClickListener {
+                selectedSide = "WHITE"
+                updateSideButtons(this, null)
+            }
+        }
 
-        sideSpinner.adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_dropdown_item,
-            arrayOf("WHITE", "BLACK")
+        val blackButton = Button(this).apply {
+            text = "BLACK"
+            setOnClickListener {
+                selectedSide = "BLACK"
+                updateSideButtons(null, this)
+            }
+        }
+
+        val startButton = Button(this).apply {
+            text = "START ANALYSIS"
+            setOnClickListener {
+                startAnalysis()
+            }
+        }
+
+        val info = TextView(this).apply {
+            text = """
+                Designed for offline positions,
+                puzzles and self-game analysis.
+
+                Screen capture is used only after
+                you explicitly grant Android permission.
+            """.trimIndent()
+
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setTextColor(Color.GRAY)
+            setPadding(0, 30, 0, 0)
+        }
+
+        root.addView(
+            title,
+            LinearLayout.LayoutParams(
+                -1,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
         )
 
-        sideSpinner.onItemSelectedListener =
-            object : AdapterView.OnItemSelectedListener {
+        root.addView(
+            subtitle,
+            LinearLayout.LayoutParams(
+                -1,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
 
-                override fun onNothingSelected(
-                    parent: AdapterView<*>?
-                ) = Unit
-
-                override fun onItemSelected(
-                    parent: AdapterView<*>?,
-                    view: android.view.View?,
-                    position: Int,
-                    id: Long
-                ) {
-                    selectedSide =
-                        if (position == 0) "WHITE" else "BLACK"
-                }
-            }
-
-        val launchButton = Button(this).apply {
-            text = "🚀 START BOARD ANALYSIS"
-
-            setOnClickListener {
-                requestCapture()
-            }
-        }
-
-        val stopButton = Button(this).apply {
-            text = "STOP ANALYSIS"
-
-            setOnClickListener {
-                stopService(
-                    Intent(
-                        this@MainActivity,
-                        LiveOverlayService::class.java
-                    )
-                )
-            }
-        }
-
-        root.addView(title)
-        root.addView(subtitle)
         root.addView(sideLabel)
-        root.addView(sideSpinner)
-        root.addView(launchButton)
-        root.addView(stopButton)
+
+        root.addView(
+            whiteButton,
+            LinearLayout.LayoutParams(
+                -1,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        root.addView(
+            blackButton,
+            LinearLayout.LayoutParams(
+                -1,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        root.addView(
+            startButton,
+            LinearLayout.LayoutParams(
+                -1,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = 20
+            }
+        )
+
+        root.addView(info)
 
         setContentView(root)
     }
 
-    private fun requestCapture() {
+    private fun updateSideButtons(
+        white: Button?,
+        black: Button?
+    ) {
+        white?.alpha = 1f
+        black?.alpha = 1f
+    }
+
+    private fun startAnalysis() {
 
         if (!Settings.canDrawOverlays(this)) {
-
-            Toast.makeText(
-                this,
-                "Overlay permission enable karo",
-                Toast.LENGTH_LONG
-            ).show()
-
-            startActivity(
-                Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName")
-                )
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
             )
 
+            startActivity(intent)
             return
         }
-
-        if (launching) return
-
-        launching = true
 
         val manager =
             getSystemService(
                 MEDIA_PROJECTION_SERVICE
             ) as MediaProjectionManager
 
-        captureLauncher.launch(
-            manager.createScreenCaptureIntent()
+        startActivityForResult(
+            manager.createScreenCaptureIntent(),
+            REQUEST_CAPTURE
         )
+    }
+
+    @Deprecated("Android framework callback")
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
+    ) {
+        super.onActivityResult(
+            requestCode,
+            resultCode,
+            data
+        )
+
+        if (
+            requestCode != REQUEST_CAPTURE ||
+            resultCode != RESULT_OK ||
+            data == null
+        ) {
+            return
+        }
+
+        val serviceIntent =
+            Intent(
+                this,
+                LiveOverlayService::class.java
+            ).apply {
+
+                putExtra(
+                    "side",
+                    selectedSide
+                )
+
+                putExtra(
+                    "resultCode",
+                    resultCode
+                )
+
+                putExtra(
+                    "data",
+                    data
+                )
+            }
+
+        if (Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(
+                serviceIntent
+            )
+        } else {
+            startService(
+                serviceIntent
+            )
+        }
     }
 }
